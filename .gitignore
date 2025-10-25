@@ -1,0 +1,89 @@
+# Dependencies
+node_modules/
+package-lock.json
+
+# Environment variables
+.env
+.env.local
+.env.production
+
+# Backend privado - NO SUBIR
+System/
+ecosystem.config.js
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pm2-*.log
+
+# PM2
+.pm2/
+pids/
+*.pid
+*.seed
+*.pid.lock
+
+# Testing
+coverage/
+.nyc_output/
+
+# Debug files
+debug/
+debug-*.js
+inspect-*.js
+test-*.js
+check-*.js
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Build outputs
+dist/
+build/
+
+# Session files
+*.session
+default_session.session
+
+# User uploads
+uploads/
+public/uploads/
+
+# Database backups
+*.sql
+*.sqlite
+*.db
+
+# Sensitive data
+config/secrets.js
+private/
+
+# Documentación interna (no pública)
+DEPLOYMENT-PRIVADO.md
+DOCUMENTACION.md
+RESUMEN-ACTUALIZACION.md
+RESUMEN-FINAL-GITHUB.md
+GITHUB-GUIDE.md
+PREPARACION-GITHUB.md
+INICIO-RAPIDO.md
+PM2-GUIDE.md
+
+# Archivos de referencia/ejemplo
+ejemplo.html
