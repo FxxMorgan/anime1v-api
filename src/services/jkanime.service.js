@@ -13,7 +13,7 @@ const HTTP_HEADERS = {
   "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
 };
 
-async function fetchHtml(url) {
+async function fetchHtmlWithCookies(url) {
   try {
     const timeout = Number(process.env.REQUEST_TIMEOUT_MS || 15000);
     const response = await axios.get(url, {
@@ -22,10 +22,20 @@ async function fetchHtml(url) {
       maxRedirects: 5,
       validateStatus: (status) => status >= 200 && status < 400,
     });
-    return response.data;
+    const rawCookies = response.headers["set-cookie"] || [];
+    const cookies = rawCookies.map((c) => c.split(";")[0]).join("; ");
+    return {
+      html: response.data,
+      cookies,
+    };
   } catch (error) {
     throw new ApiError(500, "No se pudo obtener contenido desde JKAnime", error.message);
   }
+}
+
+async function fetchHtml(url) {
+  const { html } = await fetchHtmlWithCookies(url);
+  return html;
 }
 
 async function fetchJson(url, options = {}) {
@@ -411,7 +421,14 @@ function parseAnimeInfoFromHtml(html, domain) {
     }
   });
 
-  const animeId = $("#guardar-anime").attr("data-anime") || null;
+  const animeId =
+    $("#guardar-anime").attr("data-anime") ||
+    $(".guardar-anime").attr("data-anime") ||
+    $("[data-anime]").attr("data-anime") ||
+    (html.match(/data-anime=["']?(\d+)["']?/i) || [])[1] ||
+    (html.match(/\/ajax\/episodes\/(\d+)\//i) || [])[1] ||
+    (html.match(/\/ajax\/votado\/(\d+)/i) || [])[1] ||
+    null;
 
   return {
     title,
@@ -455,6 +472,7 @@ function parseEpisodesFromHtml(html, domain, slug) {
     return episodes;
   }
 
+  const seen = new Set();
   const episodeLinks = [];
   $("a").each((_, element) => {
     const link = $(element).attr("href");
@@ -468,9 +486,10 @@ function parseEpisodesFromHtml(html, domain, slug) {
     }
 
     const number = parseEpisodeNumberFromUrl(url);
-    if (!number) {
+    if (!number || seen.has(number)) {
       return;
     }
+    seen.add(number);
 
     episodeLinks.push({
       id: null,
@@ -480,6 +499,7 @@ function parseEpisodesFromHtml(html, domain, slug) {
     });
   });
 
+  episodeLinks.sort((a, b) => a.number - b.number);
   return episodeLinks;
 }
 
@@ -490,47 +510,101 @@ function parseToken(html) {
     return metaToken.trim();
   }
 
-  const match = html.match(/var\s+token\s*=\s*['"]([^'"]+)['"]/i);
+  const match =
+    html.match(/var\s+token\s*=\s*['"]([^'"]+)['"]/i) ||
+    html.match(/_token:\s*['"]([^'"]+)['"]/i) ||
+    html.match(/['"]_token['"]\s*:\s*['"]([^'"]+)['"]/i);
   return match ? match[1] : null;
 }
 
-async function fetchEpisodesFromApi(animeId, slug, referer, token) {
+async function fetchEpisodesFromApi(animeId, slug, referer, token, cookies) {
   if (!animeId) {
     return [];
   }
 
-  const apiUrl = `https://${DEFAULT_DOMAIN}/ajax/episodes/${animeId}/1`;
+  const timeout = Number(process.env.REQUEST_TIMEOUT_MS || 15000);
   const headers = {
+    ...HTTP_HEADERS,
     "X-Requested-With": "XMLHttpRequest",
     Referer: referer,
+    "Content-Type": "application/x-www-form-urlencoded",
   };
 
-  let data = await fetchJson(apiUrl, { headers, method: "GET" });
+  if (cookies) {
+    headers.Cookie = cookies;
+  }
+  if (token) {
+    headers["X-CSRF-TOKEN"] = token;
+  }
 
-  if (!data && token) {
-    data = await fetchJson(apiUrl, {
-      headers,
-      method: "POST",
-      data: { _token: token },
+  const postData = token ? `_token=${encodeURIComponent(token)}` : "";
+
+  async function requestPage(page) {
+    try {
+      const response = await axios({
+        url: `https://${DEFAULT_DOMAIN}/ajax/episodes/${animeId}/${page}`,
+        method: "POST",
+        headers,
+        data: postData,
+        timeout,
+        validateStatus: (status) => status >= 200 && status < 400,
+      });
+      return response.data;
+    } catch (_error) {
+      return null;
+    }
+  }
+
+  const firstPageResponse = await requestPage(1);
+  if (!firstPageResponse || !Array.isArray(firstPageResponse.data)) {
+    return [];
+  }
+
+  let rawItems = [...firstPageResponse.data];
+  const lastPage = parseNumber(firstPageResponse.last_page) || 1;
+
+  if (lastPage > 1) {
+    const pagesToFetch = [];
+    for (let p = 2; p <= lastPage; p += 1) {
+      pagesToFetch.push(p);
+    }
+
+    const BATCH_SIZE = 8;
+    for (let i = 0; i < pagesToFetch.length; i += BATCH_SIZE) {
+      const batch = pagesToFetch.slice(i, i + BATCH_SIZE);
+      const batchResults = await Promise.all(
+        batch.map(async (pageNumber) => {
+          const res = await requestPage(pageNumber);
+          return Array.isArray(res?.data) ? res.data : [];
+        })
+      );
+
+      for (const pageItems of batchResults) {
+        rawItems.push(...pageItems);
+      }
+    }
+  }
+
+  const seenNumbers = new Set();
+  const episodes = [];
+
+  for (const item of rawItems) {
+    const number = parseNumber(item.number || item.episode);
+    if (!number || seenNumbers.has(number)) {
+      continue;
+    }
+    seenNumbers.add(number);
+
+    episodes.push({
+      id: item.id ?? null,
+      number,
+      title: item.title || `Episodio ${number}`,
+      url: `https://${DEFAULT_DOMAIN}/${slug}/${number}/`,
     });
   }
 
-  const items = Array.isArray(data?.data) ? data.data : [];
-  return items
-    .map((item) => {
-      const number = parseNumber(item.number || item.episode);
-      if (!number) {
-        return null;
-      }
-
-      return {
-        id: item.id ?? null,
-        number,
-        title: item.title || `Episodio ${number}`,
-        url: `https://${DEFAULT_DOMAIN}/${slug}/${number}/`,
-      };
-    })
-    .filter(Boolean);
+  episodes.sort((a, b) => a.number - b.number);
+  return episodes;
 }
 
 function buildLinkRecord(serverName, url, quality) {
@@ -596,17 +670,17 @@ async function getAnimeInfo(urlCandidate) {
   }
 
   const baseUrl = `https://${DEFAULT_DOMAIN}/${slug}/`;
-  const html = await fetchHtml(baseUrl);
+  const { html, cookies } = await fetchHtmlWithCookies(baseUrl);
   const info = parseAnimeInfoFromHtml(html, DEFAULT_DOMAIN);
+  const token = parseToken(html);
 
-  let episodes = parseEpisodesFromHtml(html, DEFAULT_DOMAIN, slug);
+  let episodes = [];
+  if (info.animeId) {
+    episodes = await fetchEpisodesFromApi(info.animeId, slug, baseUrl, token, cookies);
+  }
 
   if (episodes.length === 0) {
-    const token = parseToken(html);
-    const apiEpisodes = await fetchEpisodesFromApi(info.animeId, slug, baseUrl, token);
-    if (apiEpisodes.length > 0) {
-      episodes = apiEpisodes;
-    }
+    episodes = parseEpisodesFromHtml(html, DEFAULT_DOMAIN, slug);
   }
 
   const totalEpisodes = info.infoValues.totalEpisodes || episodes.length || null;
